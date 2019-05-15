@@ -119,7 +119,7 @@ app.post('/canvas', function(req, res) {
 })
 
 // RUN
-app.listen('8080', function() {
+app.listen(process.env.PORT || 3000, function() {
     console.log('server run on localhost:8080')
 })
 
