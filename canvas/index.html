@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>Document</title>
+</head>
+<body>
+    Hello
+
+    <canvas width="200" height="200"></canvas>
+    <button id="button">test</button>
+
+    <script>
+      var canvas = document.querySelector('canvas');
+      var ctx = canvas.getContext('2d');
+      document.getElementById('button').onclick = function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', '/canvas');
+
+        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+        xhr.send(
+          'data=' + encodeURIComponent('test')
+        );
+
+        xhr.onreadystatechange = function() { // (3)
+            if (xhr.readyState != 4) return;
+
+            if (xhr.status != 200) {
+                alert(xhr.status + ': ' + xhr.statusText);
+            } else {
+                if(+xhr.responseText === 0) {
+                    alert('Не верные данные.')
+                } else {
+                  var img = new Image;
+                  img.onload = function(){
+                    ctx.drawImage(img,0,0);
+                  };
+                  img.src = xhr.responseText;
+                }
+            }
+
+        }
+      };
+    </script>
+</body>
+</html>
