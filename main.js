@@ -1,146 +1,109 @@
+var scene = new THREE.Scene();
+var camera = new THREE.PerspectiveCamera( 75, window.innerWidth/window.innerHeight, 0.1, 1000 );
+var renderer = new THREE.WebGLRenderer();
 
-const express = require('express')
-const session = require('express-session')
-const bodyParser = require('body-parser')
-const path = require('path')
-const db = require('./db')
+renderer.setSize( window.innerWidth, window.innerHeight );
+document.body.appendChild( renderer.domElement );
 
-const app = express()
-app.set("view engine", "ejs");
+var light = new THREE.AmbientLight( 0x404040, 0.7 ); 
+scene.add( light );
+var pointLight = new THREE.PointLight( 0xffffff, 0.7, 100 );
+pointLight.position.y = 5
+scene.add( pointLight );
 
-// midleware settings
-app.use(session({
-    resave: false,
-    saveUninitialized: false,
-    secret: 't}5v7]5136%=}{hf'
-}))
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: false })); 
+var geometry = new THREE.PlaneGeometry( 8, 8 );
+var material = new THREE.MeshPhongMaterial( { color: 0x00ff00 } );
+var plane = new THREE.Mesh( geometry, material );
+plane.rotation.x = -Math.PI/2
+scene.add( plane );
 
-// HOME
-app.use('/', express.static(path.join(__dirname, 'home')))
+camera.position.set(-3, 5, 5);
+camera.lookAt(scene.position)
 
-// AUTH
-app.use('/auth', function(req, res, next) {
-    if(req.session.user) {
-        res.redirect('/')
-        next()
-    } else {
-        express.static(path.join(__dirname, 'auth'))(req, res, next)
+var animate = function () {
+    requestAnimationFrame( animate );
+
+    renderer.render( scene, camera );
+};
+
+animate();
+
+// plane cnv material
+var cnv = document.createElement('canvas');
+cnv.width = 512
+cnv.height = 512
+var ctx = cnv.getContext('2d')
+ctx.fillStyle = '#FFFFFF'
+ctx.fillRect(0, 0, cnv.width, cnv.height)
+
+var texture = new THREE.CanvasTexture(cnv)
+plane.material.color = null
+plane.material.map = texture
+plane.material.needsUpdate = true
+
+// raycast
+var raycaster = new THREE.Raycaster();
+var mouse = new THREE.Vector2();
+
+var isFixed = true
+function fixed(val) {
+    ctx.fillStyle = '#FFFFFF'
+    ctx.fillRect(0, 0, cnv.width, cnv.height)
+    texture.needsUpdate  = true
+    isFixed = val
+}
+
+function onMouseDown( event ) {
+    if(isFixed) return
+
+	mouse.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+    mouse.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+    
+    raycaster.setFromCamera( mouse, camera );
+    var intersects = raycaster.intersectObjects( scene.children );
+
+    if(intersects.length && intersects[0].object == plane) {
+        ctx.fillStyle = 'red'
+        ctx.beginPath();
+        ctx.arc(
+            cnv.width*intersects[0].uv.x,
+            cnv.height-cnv.height*intersects[0].uv.y,
+            10,
+            0,
+            Math.PI*2
+        )
+        ctx.fill()
+        texture.needsUpdate  = true
+        plane.material.needsUpdate  = true
     }
-})
-app.post('/auth', function(req, res) {
-    if(req.session.user) {
-        res.redirect('/')
-        return
+}
+
+window.addEventListener( 'mousedown', onMouseDown, false );
+
+function onMouseMove( event ) {
+    if(!isFixed) return
+    
+	mouse.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+    mouse.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+    
+    raycaster.setFromCamera( mouse, camera );
+    var intersects = raycaster.intersectObjects( scene.children );
+
+    if(intersects.length && intersects[0].object == plane) {
+        ctx.fillStyle = '#FFFFFF'
+        ctx.fillRect(0, 0, cnv.width, cnv.height)
+        ctx.fillStyle = 'red'
+        ctx.beginPath();
+        ctx.arc(
+            cnv.width*intersects[0].uv.x,
+            cnv.height-cnv.height*intersects[0].uv.y,
+            10,
+            0,
+            Math.PI*2
+        )
+        ctx.fill()
+        texture.needsUpdate  = true
     }
+}
 
-    if(req.body.create) {
-        db.user.get({
-            params: {login: req.body.login},
-            callback: data => {
-                if(data) {
-                    res.end('0')
-                } else {
-                    db.user.add({
-                        params: {login: req.body.login, password: req.body.password},
-                        callback: data => {
-                            req.session.user = data[0]._id
-                            res.end('1')
-                        }
-                    })
-                }
-            }
-        })
-    } else {
-        db.user.get({
-            params: {login: req.body.login, password: req.body.password},
-            callback: data => {
-                if(data) {
-                    req.session.user = data._id
-                    res.end('1')
-                } else {
-                    res.end('0')
-                }
-            }
-        })
-    }
-})
-
-// CANVAS
-app.use('/canvas', function(req, res, next) {
-    if(req.session.user) {
-        if(req.session.room_id !== undefined) {
-            express.static(path.join(__dirname, 'canvas/api'))(req, res, next)
-        } else {
-            express.static(path.join(__dirname, 'canvas/mode'))(req, res, next)
-        }
-    } else {
-        res.redirect('/auth')
-        next()
-    }
-})
-app.get('/canvas', function(req, res) {
-    if(req.session.user && req.session.room_id !== undefined) {
-        res.render(path.join(__dirname, 'canvas/api'), {
-            room: db.user.toString(req.session.room_id)
-        })
-    }
-})
-app.post('/canvas', function(req, res) {
-    if(req.body.exit) {
-        delete req.session.room_id
-        res.send('1')
-    } else
-    if(req.body.create) {
-        db.room.add({
-            callback: data => {
-                if(data) {
-                    req.session.room_id = data.key
-                    res.send('1')
-                } else {
-                    res.send('0')
-                }
-            }
-        })
-    } else {
-        db.room.get({
-            params: {key: +req.body.id},
-            callback: data => {
-                if(data) {
-                    req.session.room_id = data.key
-                    res.send('1')
-                } else {
-                    res.send('0')
-                }
-            }
-        })
-    }
-})
-
-// RUN
-app.listen(process.env.PORT || 3000, function() {
-    console.log('server run on localhost:8080')
-})
-
-
-
-// const { createCanvas } = require('canvas')
-// app.post('/canvas', function(req, res) {
-//   var canvas = createCanvas(200, 200)
-//   var ctx = canvas.getContext('2d')
-//
-//   ctx.fillStyle = 'lightgreen'
-//   ctx.fillRect(0, 0, canvas.width, canvas.height)
-//
-//   ctx.beginPath()
-//   ctx.moveTo(10, 10)
-//   ctx.lineTo(190, 10)
-//   ctx.lineTo(190, 190)
-//   ctx.lineTo(10, 190)
-//   ctx.closePath()
-//   ctx.stroke()
-//
-//   res.send(canvas.toDataURL())
-// })
-
+window.addEventListener( 'mousemove', onMouseMove, false );
