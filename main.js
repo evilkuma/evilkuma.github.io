@@ -1,109 +1,178 @@
-var scene = new THREE.Scene();
-var camera = new THREE.PerspectiveCamera( 75, window.innerWidth/window.innerHeight, 0.1, 1000 );
-var renderer = new THREE.WebGLRenderer();
 
-renderer.setSize( window.innerWidth, window.innerHeight );
-document.body.appendChild( renderer.domElement );
+(function() {
 
-var light = new THREE.AmbientLight( 0x404040, 0.7 ); 
-scene.add( light );
-var pointLight = new THREE.PointLight( 0xffffff, 0.7, 100 );
-pointLight.position.y = 5
-scene.add( pointLight );
+  var SCOPE
+  var ROOMS
 
-var geometry = new THREE.PlaneGeometry( 8, 8 );
-var material = new THREE.MeshPhongMaterial( { color: 0x00ff00 } );
-var plane = new THREE.Mesh( geometry, material );
-plane.rotation.x = -Math.PI/2
-scene.add( plane );
+  requirejs(['./models/main'], function(data) {
 
-camera.position.set(-3, 5, 5);
-camera.lookAt(scene.position)
+    SCOPE = data.global
+    ROOMS = data.rooms
 
-var animate = function () {
-    requestAnimationFrame( animate );
+    SCOPE.gui = new dat.GUI();
 
-    renderer.render( scene, camera );
-};
+    run()
+  
+  });
 
-animate();
+  var scene, bmcontrol, ocontrol, rmcontrol
 
-// plane cnv material
-var cnv = document.createElement('canvas');
-cnv.width = 512
-cnv.height = 512
-var ctx = cnv.getContext('2d')
-ctx.fillStyle = '#FFFFFF'
-ctx.fillRect(0, 0, cnv.width, cnv.height)
+  var box = new THREE.Box3
 
-var texture = new THREE.CanvasTexture(cnv)
-plane.material.color = null
-plane.material.map = texture
-plane.material.needsUpdate = true
+  function isMarked(obj) {
 
-// raycast
-var raycaster = new THREE.Raycaster();
-var mouse = new THREE.Vector2();
+    box.setFromObject(obj)
+    var res = box.getSize(new THREE.Vector3)
+    box.max.sub(obj.position)
+    box.min.sub(obj.position)
+    box.min.x += -0.01
+    box.min.y += 0.01
+    box.min.z += -0.01
+    box.max.addScalar(0.01)
 
-var isFixed = true
-function fixed(val) {
-    ctx.fillStyle = '#FFFFFF'
-    ctx.fillRect(0, 0, cnv.width, cnv.height)
-    texture.needsUpdate  = true
-    isFixed = val
-}
+    var mark = new THREE.Box3Helper( box.clone() )
 
-function onMouseDown( event ) {
-    if(isFixed) return
+    mark.visible = false
+    mark.material.linewidth = 3
+    obj.add(mark)
 
-	mouse.x = ( event.clientX / window.innerWidth ) * 2 - 1;
-    mouse.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
-    
-    raycaster.setFromCamera( mouse, camera );
-    var intersects = raycaster.intersectObjects( scene.children );
-
-    if(intersects.length && intersects[0].object == plane) {
-        ctx.fillStyle = 'red'
-        ctx.beginPath();
-        ctx.arc(
-            cnv.width*intersects[0].uv.x,
-            cnv.height-cnv.height*intersects[0].uv.y,
-            10,
-            0,
-            Math.PI*2
-        )
-        ctx.fill()
-        texture.needsUpdate  = true
-        plane.material.needsUpdate  = true
+    obj.mark = function(color) {
+      mark.visible = !!color
+      if(color) {
+        mark.material.color = new THREE.Color(color)
+      }
     }
-}
 
-window.addEventListener( 'mousedown', onMouseDown, false );
+    return res
 
-function onMouseMove( event ) {
-    if(!isFixed) return
+  }
+
+  function fixedOrigin(obj) {
+
+    box.setFromObject(obj)
+
+    var len = box.max.clone().sub(box.min)
+    var cmax = box.max.sub(len.divideScalar(2))
+
+    var res = new THREE.Group
+    res.add(obj)
+    obj.position.sub(cmax)
+
+    return res
+
+  }
+
+  function run() {
+
+    scene = new THREE.DefaultScene(document.body)
+    SCOPE.scene = scene.scene
+
+    ocontrol = new THREE.OrbitControls(scene.camera, scene.renderer.domElement)
+    ocontrol.target.y = 40
+    scene.ocontrol = ocontrol
     
-	mouse.x = ( event.clientX / window.innerWidth ) * 2 - 1;
-    mouse.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
-    
-    raycaster.setFromCamera( mouse, camera );
-    var intersects = raycaster.intersectObjects( scene.children );
 
-    if(intersects.length && intersects[0].object == plane) {
-        ctx.fillStyle = '#FFFFFF'
-        ctx.fillRect(0, 0, cnv.width, cnv.height)
-        ctx.fillStyle = 'red'
-        ctx.beginPath();
-        ctx.arc(
-            cnv.width*intersects[0].uv.x,
-            cnv.height-cnv.height*intersects[0].uv.y,
-            10,
-            0,
-            Math.PI*2
-        )
-        ctx.fill()
-        texture.needsUpdate  = true
+    bmcontrol = new THREE.BMControl({
+      scene,
+      ocontrol
+    })
+
+    rmcontrol = new THREE.RoomControls({scene, room: bmcontrol.room, ocontrol})
+    
+    var loadRoom = function() {
+      bmcontrol.room.setWallsBySizes(this)
+      scene.scene.add(bmcontrol.room)
     }
-}
 
-window.addEventListener( 'mousemove', onMouseMove, false );
+    var rooms = SCOPE.gui.addFolder('room')
+    SCOPE.room_sizes = SCOPE.gui.addFolder('room sizes')
+    ROOMS.forEach(r => rooms.add({ load: loadRoom.bind(r.data) }, 'load').name(r.caption))
+
+    SCOPE.gui.add({editWalls() { rmcontrol.enable() }}, 'editWalls').name('edit walls mode enabled')
+
+    loadRoom.bind(ROOMS[7].data)()
+
+    // bmcontrol.events.onview = function(obj, objs) {
+    //   objs.forEach(o => o.obj.mark())
+    //   if(obj) obj.obj.mark('red')
+    // }
+    bmcontrol.events.onselected = function(obj, objs) {
+      objs.forEach(o => o.mesh.mark())
+      obj.mesh.mark('green')
+    }
+    bmcontrol.events.onunselected = function(obj, objs) {
+      obj.mesh.mark()
+    }
+
+    var assets = [
+      { 
+        key: 'soldier', 
+        title: 'soldier',
+        data: {
+          type: 'floor',
+          position: true
+        }
+      },
+      { 
+        key: 'bed', 
+        title: 'bed',
+        data: {
+          type: 'floor',
+          position: true
+        }
+      },
+      { 
+        key: 'closet', 
+        title: 'closet',
+        data: {
+          type: 'wall',
+          position: true
+        }
+      },
+      { 
+        key: 'table', 
+        title: 'table',
+        data: {
+          type: 'floor',
+          position: true
+        }
+      },
+    ]
+
+    function loadMTL() {
+      // TODO: cached requests
+      new THREE.MTLLoader().setPath('assets/'+this.key+'/').load('OBJ.mtl', materials => {
+  
+        materials.preload();
+  
+        new THREE.OBJLoader().setMaterials(materials).setPath('assets/'+this.key+'/').load('OBJ.obj', obj => {
+  
+          obj = fixedOrigin(obj)
+          isMarked(obj)
+          obj.scale.multiplyScalar(2)
+  
+          scene.scene.add(obj)
+
+          var data = Object.assign({obj}, this.data)
+    
+          bmcontrol.add(data)
+  
+        })
+  
+      })
+
+    }
+
+    var assets_gui = SCOPE.gui.addFolder('assets')
+
+    assets.forEach(a => {
+
+      a.load = loadMTL.bind({key: a.key, data: a.data})
+      var g = assets_gui.add(a, 'load')
+      g.name(a.title)
+      
+    })
+
+  }
+
+})()
