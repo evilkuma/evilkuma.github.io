@@ -1,22 +1,173 @@
 
 import { Room } from './Room'
-import { Rectangle } from './Rectangle'
 import { SizeLine } from './SizeLine'
 import * as _Math from './Math'
+import { _Math as THREE_MATH } from 'three/src/math/Math'
+
 import { Raycaster } from 'three/src/core/Raycaster'
 import { Ray } from 'three/src/math/Ray'
 import { Vector2 } from 'three/src/math/Vector2'
 import { Vector3 } from 'three/src/math/Vector3'
-import { Plane } from 'three/src/math/Plane'
-import { Euler } from 'three/src/math/Euler'
-import { Line3 } from 'three/src/math/Line3'
 import { Box3 } from 'three/src/math/Box3'
+
+var SAT = require('sat')
 
 var raycaster = new Raycaster
 var ray = new Ray
 var box = new Box3
 
-var size_lines = [ new SizeLine, new SizeLine ]
+function BMObject(data) {
+
+  this.mesh = data.obj
+  this.type = data.type || 'floor'
+  this.parent = data.parent
+
+  this.update(data.size)
+
+}
+
+BMObject.prototype.update = function(size) {
+
+  if(!size) size = box.setFromObject(this.mesh).getSize(new Vector3)
+
+  this.size = size
+  this.realsize = this.size.clone()
+
+  this.SAT = {
+    // from xz
+    v: new SAT.Polygon(new SAT.Vector(0,0), [
+      new SAT.Vector(-this.size.x/2,-this.size.z/2),
+      new SAT.Vector( this.size.x/2,-this.size.z/2),
+      new SAT.Vector( this.size.x/2,this.size.z/2),
+      new SAT.Vector(-this.size.x/2,this.size.z/2)
+    ]),
+    // from y (x/z)
+    h: new SAT.Polygon(new SAT.Vector(0,0), [
+      new SAT.Vector(-this.size.x/2,-this.size.y/2),
+      new SAT.Vector( this.size.x/2,-this.size.y/2),
+      new SAT.Vector( this.size.x/2,this.size.y/2),
+      new SAT.Vector(-this.size.x/2,this.size.y/2)
+    ])
+  }
+
+  if(this.type === 'floor') {
+
+    this.mesh.position.y = this.size.y/2
+
+  }
+  
+  this.setPosition(this.mesh.position, true)
+
+}
+
+BMObject.prototype.setPosition = function(vec, flag) {
+
+  if(this.type === 'floor') {
+
+    this.mesh.position.x = vec.x
+    this.mesh.position.y = this.size.y/2
+    this.mesh.position.z = vec.z
+
+  } else
+  if(this.type === 'wall') {
+
+    this.mesh.position.x = vec.x
+    this.mesh.position.y = vec.y
+    this.mesh.position.z = vec.z
+
+    if(this.wall && !flag) {
+
+      this.mesh.position.add(
+        this.wall.normal.clone().multiplyScalar(this.size.z/2)
+      )
+
+    }
+
+  }
+  
+  this.setSAT(this.mesh.position)
+
+  return this
+
+}
+
+BMObject.prototype.setSAT = function(vec) {
+
+  this.SAT.v.pos.x = vec.x
+  this.SAT.v.pos.y = vec.z
+
+  this.SAT.h.pos.x = new Vector2(vec.x, vec.z).rotateAround(new Vector2, this.mesh.rotation.y).x
+  this.SAT.h.pos.y = vec.y
+
+  return this
+
+}
+
+BMObject.prototype.setXZ = function(val, origin = new Vector3, y = this.mesh.position.y) {
+
+  // x to xz
+  var pos = new Vector2(val, 0).rotateAround(new Vector2, -this.mesh.rotation.y)
+
+  // xz to xyz
+  origin.x += +pos.x.toFixed(10)
+  origin.y = y
+  origin.z += +pos.y.toFixed(10)
+
+  // set position
+  return this.setPosition(origin)
+
+}
+
+BMObject.prototype.remove = function() {
+
+  if(this.mesh.parent) this.mesh.parent.remove(this.mesh)
+  this.parent.remove(this)
+
+  return this
+
+}
+
+BMObject.prototype.setRotation = function(rot) {
+
+  this.mesh.rotation.y = rot
+  this.SAT.v.setAngle(-rot)
+  
+  _Math.calcRealSize(this.realsize.copy(this.size), this.mesh.rotation.y, 'x', 'z').abs()
+
+  return this
+
+}
+
+BMObject.prototype.findWall = function() {
+
+  var rot = +THREE_MATH.euclideanModulo(+this.mesh.rotation.y.toFixed(10), 2* Math.PI).toFixed(10)
+  var res, mlen
+
+  this.parent.room._walls.forEach(wall => {
+
+    var wrot = +THREE_MATH.euclideanModulo(+wall.mesh.rotation.y.toFixed(10), 2* Math.PI).toFixed(10)
+
+    if(rot === wrot) {
+
+      var len = wall.distanceToPoint(this.mesh.position)
+
+      if(!mlen || len < mlen) {
+
+        res = wall
+        mlen = len
+
+      }
+
+    }
+
+  })
+
+  this.wall = res
+  res.objects.push(this)
+
+  return res
+
+}
 
 /**
  * Ищет 3д обьект для взаимодействия
@@ -28,16 +179,18 @@ var size_lines = [ new SizeLine, new SizeLine ]
 function findObject(self) {
 
   raycaster.setFromCamera( self.mouse, self.scene.camera ) 
-  
+
   var intersect = new Vector3
   var dist = false
   var res = false
 
   for(var info of self.objects) {
     
-    var obj = info.obj
+    var obj = info.mesh
 
-    if(raycaster.ray.intersectBox(box.setFromObject(obj), intersect)) {
+    box.setFromCenterAndSize(obj.position, info.size)
+
+    if(raycaster.ray.intersectBox(box, intersect)) {
 
       var ndist = intersect.sub(raycaster.ray.origin).length()
 
@@ -56,337 +209,292 @@ function findObject(self) {
 
 }
 
-function getInterestWalls(self, intersect, exclude) {
-
-  var res = []
-  var rect = self.rects[self.objects.indexOf(self.obj)]
-
-  for(var p of self.room._walls) {
-
-    if(exclude && exclude.includes(p)) continue
-
-    ray.set(intersect, p.rvec.clone().multiplyScalar(-1))
-    var pos = ray.intersectPlane(p, new Vector3)
-
-    if(pos) {
-      if( (pos.x > p.max.x || pos.x < p.min.x) || (pos.z > p.max.z || pos.z < p.min.z) ) 
-        continue
-    } else {
-      var angle = p.point1.angleTo(p.point2) - p.point1.angleTo(intersect) - p.point2.angleTo(intersect)
-      if(+angle.toFixed(10) < 0) continue
-    }
-
-    var points = rect.getMovedLines(intersect).map(pt => pt.start)
-
-    var isOver = false
-    var over_poses = points.map(pt => {
-  
-      ray.set(pt, p.rvec)
-      var res = ray.intersectPlane(p, new Vector3)
-      if(res) isOver = true
-  
-      return res
-  
-    })
-
-    if(!isOver) continue
-
-    var idx, distance = 0
-    for(let i = 0; i < over_poses.length; i++) {
-
-      if(!over_poses[i]) continue
-
-      var ndist = over_poses[i].distanceTo(points[i])
-      if(ndist >= distance) {
-        distance = ndist
-        idx = i
-      }
-
-    }
-
-    var mv = p.rvec.clone().multiplyScalar(.001)
-    var nx = intersect.x - (points[idx].x - over_poses[idx].x) + mv.x
-    var nz = intersect.z - (points[idx].z - over_poses[idx].z) + mv.z
-
-    res.push({ 
-      point: new Vector3(nx, 0, nz),
-      p
-    })
-
-  }
-
-  return res
-
-}
-
-function getInterestObjs(self, intersect, exclude) {
-
-  var res = []
-  var obj = self.obj.obj
-  var rect = self.rects[self.objects.indexOf(self.obj)]
-
-  for(var i in self.objects) {
-    
-    var obj1 = self.objects[i].obj
-    var rect1 = self.rects[i]
-
-    if(obj === obj1 || (exclude && exclude.includes(obj1))) continue
-
-    var cross = rect.cross(rect1, intersect)
-    if(!cross) continue
-
-    res.push({
-      cross,
-      obj1: self.objects[i]
-    })
-
-  }
-
-  return res
-
-}
-
-function setFixedWalls(walls, intersect) {
-
-  if(!walls.length) return false
-  if(walls.length === 1) {
-    intersect.copy(walls[0].point)
-    return walls[0].p.rvec
-  }
-
-  var vec1 = walls[0].p.rvec.clone().applyEuler(new Euler(0, Math.PI/2, 0))
-  var vec2 = walls[1].p.rvec.clone().applyEuler(new Euler(0, Math.PI/2, 0))
-
-  ray.set(walls[0].point, vec1)
-
-  var res = ray.intersectVec2( vec2, walls[1].point, 'xz')
-
-  intersect.copy(res)
-
-  return walls[0].p.rvec.clone().add(walls[1].p.rvec).normalize()
-
-}
-
-function setFixedObjs(self, objs, intersect, vec) {
-
-  if(!objs.length) return
-
-  /**
-   * calc vector mv
-   */
-
-  var rect = self.rects[self.objects.indexOf(self.obj)]
-  var v = new Vector3
-
-  objs.map((o, i) => {
-    
-    var rect1 = self.rects[self.objects.indexOf(o.obj1)]
-    o.rect1 = rect1
-    var lines = rect1.getWorldLines()
-    
-    var info = lines.map(line => {
-
-      var v = line.start.clone().sub(line.end).normalize()
-      var dir = v.clone().applyEuler(new Euler(0, Math.PI/2, 0)).toFixed(10)
-
-      ray.origin.copy(intersect)
-      ray.direction.copy(dir.clone().multiplyScalar(-1))
-
-      var p1 = v.clone().multiplyScalar(1000).add(line.start)
-      var p2 = v.clone().multiplyScalar(-1000).add(line.end)
-
-      if(!ray.intersectsLine2(new Line3(p1, p2), 'xz'))
-        return false
-
-      return { v, line, dir }
-
-    }).filter(l => !!l)
-
-    if(info.length === 1) return info[0].dir
-    if(info.length === 2) return info[0].dir.clone().add(info[1].dir).normalize()
-    return rect1.directionFromTriangles(intersect)
-
-  }).filter(v => !!v).forEach(e => v.add(e).normalize())
-
-  if(v.equals({x:0, y:0, z:0})) v = vec ? vec : new Vector3(0, 0, 1)
-  else if(vec) {
-    var vecr = vec.clone().applyEuler(new Euler(0, Math.PI/2, 0))
-    var a = Math.PI/2
-    if(vecr.angleTo(v) > Math.PI/2) a *= -1
-
-    v = vec.clone().applyEuler(new Euler(0, a, 0)).toFixed().normalize()
-
-  }
-
-  if(vec && v.angleTo(vec) > Math.PI/2) v = vec
-
-  /**
-   * calc mv val by vector
-   */
-
-  if(objs.length === 1) {
-      
-    var line1 = rect.getLineFromDirect(v.clone().multiplyScalar(-1)) 
-    if(line1) {
-
-      line1 = line1.clone()
-      line1.start.add(intersect)
-      line1.end.add(intersect)
-
-    } else return false
-
-    var line2 = objs[0].rect1.getLineFromDirect(v)
-    if(line2) line2 = objs[0].rect1.localToWorld(line2)
-      else return false
-
-    var p
-
-    var v1 = v.clone()
-    var v2 = v.clone().multiplyScalar(-1)
-    var fs = [
-      [line1.start, v1, line2],
-      [line1.end,   v1, line2],
-      [line2.start, v2, line1],
-      [line2.end,   v2, line1]
-    ]
-
-    var res = fs.map(f => {
-
-      ray.direction.copy(f[1])
-      ray.origin.copy(f[0])
-
-      var pos = ray.intersectLine2(f[2], 'xz')
-      
-      if(!pos) return false
-
-      return [pos.distanceTo(f[0]), f[1] === v1 ? pos.sub(f[0]) : f[0].clone().sub(pos)]
-
-    }).filter(el => !!el)
-    
-    if(!res.length) return false
-
-    var dist = res[0]
-    for(var i = 1; i < res.length; i++)
-      if(res[i][0] > dist[0]) {
-
-        dist = res[i]
-
-      }
-
-    p = dist[1]
-
-    if(!p) {
-
-      return false
-    }
-
-    p.add(v.clone().multiplyScalar(.001))
-
-    intersect.add(p)
-
-    return true
-
-  }
-
-  if(objs.length === 2) {
-
-    // TODO: add multy objs
-
-  }
-
-}
-
 /**
  * Расчет передвижения обьекта
  * 
  * @param {BMControl} self 
  */
+var response = new SAT.Response();
 function moveSelected(self) {
 
-    // настраиваем кастер и пуляем луч в плэйн пола
-    raycaster.setFromCamera( self.mouse, self.scene.camera )
+  // настраиваем кастер и пуляем луч в плэйн пола
+  raycaster.setFromCamera( self.mouse, self.scene.camera )
 
-    if(self.obj.type === 'wall' || self.obj.type === 'full') {
+  var pos, wall
 
-      // move by wall
-      var isRemove, wall1
+  for(wall of self.room._walls) {
+    
+    if(pos = wall.ray(raycaster)) {
 
-      for(wall1 of self.room._walls)
-        if(isRemove = wall1.removeObj(self.obj)) break
-  
+      break
+
+    }
+
+  }
+
+  if(!!pos && self.obj.wall !== wall) {
+
+    if(self.obj.wall) {
+
+      self.obj.wall.removeObj(self.obj)
+
+    }
+
+    wall.addObj(self.obj)
+    self.obj.wall = wall
+
+  }
+
+  if(self.obj.type === 'floor' || self.obj.type === 'full') {
+
+    if(pos) self.obj.setRotation(wall.mesh.rotation.y)
+
+    var intersect = raycaster.intersectObject( self.room._floor, false )
+
+    // если мимо ничего не делаем
+    if(!intersect.length) {
+
+      if(!pos) return
+
+      intersect = pos.clone()
+      intersect.y = 0
+
+    }
+    else intersect = intersect[0].point
+
+    self.obj.setPosition(intersect)
+
+    var position = self.obj.mesh.position.clone()
+
+    var iter = 0
+
+    var collide = function(w, v) {
+
+      iter++
+
+      if(iter > 50) return console.warn('the most iters')
+
+      // walls
       for(var wall of self.room._walls) {
-  
-        var pos = false
-  
-        if(pos = wall.ray(raycaster)) {
-  
-          wall.addObj(self.obj)
 
-          if(isRemove && wall !== wall1) wall1.limits_y.forEach(limit => limit.mesh.visible = false)
-  
-          return moveByWall(self, wall, pos)
-  
+        var collided = SAT.testPolygonPolygon(self.obj.SAT.v, wall.SAT)
+
+        if(collided) {
+
+          var point = wall.projectPoint(self.obj.mesh.position, new THREE.Vector3)
+                          .add(self.obj.realsize.clone().divideScalar(2).multiply(wall.normal))
+
+          var signx = Math.sign(+wall.normal.x.toFixed(10))
+          var signy = Math.sign(+wall.normal.z.toFixed(10))
+
+          if(w) {
+
+            if(!w.x)
+              w.x = signx
+            else if(signx && w.x !== signx) console.log('fack')
+            
+            if(!w.z)
+              w.z = signy
+            else if(signy && w.z !== signy) console.log('fack')
+
+          } else w = new Vector3(signx, 0, signy)
+
+          if(signx)
+          position.x = point.x
+          if(signy)
+          position.z = point.z
+
+          // additional offset so that there would be no intersection
+          position.add(
+            new Vector3(signx, 0, signy).multiplyScalar(.01)
+          )
+
+          self.obj.setSAT(position)
+
+          collide(w, v)
+          return
+
         }
-  
+
       }
 
-      return false
+      var objects = self.objects.filter(obj => obj.type === 'floor' || ( !!self.obj.wall &&  self.obj.wall === obj.wall ))
+
+      // objects
+      for(var obj of objects) {
+
+        if(obj === self.obj) continue
+
+        if(obj.type === 'wall') {
+          // проверка по высоте (наличие пересечения 2 отрезков на прямой)
+          if((
+            Math.min(self.obj.mesh.position.y + self.obj.size.y/2, obj.mesh.position.y + obj.size.y/2) -
+            Math.max(self.obj.mesh.position.y - self.obj.size.y/2, obj.mesh.position.y - obj.size.y/2)
+          ) < 0) continue
+
+        }
+
+        response.clear()
+        var collided = SAT.testPolygonPolygon(self.obj.SAT.v, obj.SAT.v, response)
+
+        if(collided) {
+
+          response.overlapV.x = +response.overlapV.x.toFixed(10)
+          response.overlapV.y = +response.overlapV.y.toFixed(10)
+
+          var signx = -Math.sign(response.overlapV.x)
+          var signy = -Math.sign(response.overlapV.y)
+
+          response.overlapV.x = Math.abs(response.overlapV.x) * signx
+          response.overlapV.y = Math.abs(response.overlapV.y) * signy
+
+          if(v) {
+
+            var signx1 = v.x
+            var signy1 = v.z
+
+            if(w) {
+
+              var _signx1 = w.x
+              var _signy1 = w.z
+
+              if(_signx1) signx1 = _signx1
+              if(_signy1) signy1 = _signy1
+
+            }
+
+            if(signx && signx1 && signx !== signx1) {
+
+              response.overlapV.x =(self.obj.realsize.x + obj.realsize.x - Math.abs(response.overlapV.x)) * signx1
+
+            }
+
+            if(signy && signy1 && signy !== signy1) {
+
+              response.overlapV.y = (self.obj.realsize.z + obj.realsize.z - Math.abs(response.overlapV.y)) * signy1
+
+            }
+
+            v.x = signx1
+            v.z = signy1
+
+            if(!v.x) v.x = signx
+            if(!v.z) v.z = signy
+
+          } else v = new Vector3(signx, 0, signy)
+
+          position.x += response.overlapV.x + v.x * 0.01
+          position.z += response.overlapV.y + v.z * 0.01
+
+          if(w)
+          position.add(w.clone().multiplyScalar(.01))
+          // assign changes
+          self.obj.setSAT(position)
+
+          // use recursive
+          collide(w, v)
+          return
+
+        }
+
+      }
 
     }
 
-    if(self.obj.type === 'floor' || self.obj.type === 'full') {
+    collide()
 
-      // rotate by wall
-      for(var wall of self.room._walls)
-        if(wall.ray(raycaster)) {
+    self.obj.setPosition(position)
 
-          self.obj.obj.rotation.y = wall.mesh.rotation.y
-          break
+    self.updateSizeLines(self.obj)
 
-        }
+  } else if(self.obj.type === 'wall') {
 
-      // move by floor
+    if(!pos) return
 
-      var intersect = raycaster.ray.intersectPlane( self.room._plane, new Vector3 )
+    self.obj.setPosition(pos)
 
-      // если мимо ничего не делаем (правда это анрил, но на всяк)
-      if(!intersect) return false
+    var iter = 0
 
-      var info = self.getObjInfo(self.obj)
-      self.obj.obj.position.y = info.size.y/2
+    var collide = function(v) {
 
-      var walls = getInterestWalls(self, intersect)
+      iter++
+      if(iter > 50) 
+        return console.warn('the most iters')
 
-      if(walls.length === 1) {
+      if(!self.obj.wall) return
 
-        var tmp = getInterestWalls(self, walls[0].point, [walls[0].p])
-        if(tmp.length) walls.push(tmp[0])
+      // проверка на выход за пределы стены и фиксирование возле края
+      if(self.obj.SAT.h.pos.y - self.obj.size.y/2 < 0) {
+        // floor
+        pos.y = self.obj.size.y/2
+        self.obj.setPosition(pos)
+
+        v.y = 1
 
       }
+      if(self.obj.SAT.h.pos.x - self.obj.size.x/2 < self.obj.wall.posx - self.obj.wall.l/2) {
+        // left edge
+        self.obj.setXZ(-self.obj.wall.l/2 + self.obj.size.x/2, self.obj.wall.position.clone())
 
-      var v = setFixedWalls(walls, intersect)
+        v.x = 1
 
-      var objs = getInterestObjs(self, intersect)
-
-      if(!objs.length) {
-
-        self.obj.obj.position.x = intersect.x
-        self.obj.obj.position.z = intersect.z
+      } else
+      if(self.obj.SAT.h.pos.x + self.obj.size.x/2 > self.obj.wall.posx + self.obj.wall.l/2) {
+        // right edge
+        self.obj.setXZ(self.obj.wall.l/2 - self.obj.size.x/2, self.obj.wall.position.clone())
         
-        return true
+        v.x = -1
 
       }
 
-      if( setFixedObjs(self, objs, intersect, v) ) {
+      for(var obj of self.obj.wall.objects) {
 
-        walls = getInterestWalls(self, intersect)
+        if(obj === self.obj) continue
 
-        if(!walls.length) {
+        response.clear()
+        var collided = SAT.testPolygonPolygon(self.obj.SAT.h, obj.SAT.h, response)
 
-          self.obj.obj.position.x = intersect.x
-          self.obj.obj.position.z = intersect.z
+        if(collided) {
 
-          return true
+          response.overlapV.x = +response.overlapV.x.toFixed(10)
+          response.overlapV.y = +response.overlapV.y.toFixed(10)
+
+          var signx = -Math.sign(response.overlapV.x)
+          var signy = -Math.sign(response.overlapV.y)
+
+          if(signx && v.x && signx !== v.x) {
+
+            response.overlapV.x = (self.obj.size.x + obj.size.x - Math.abs(response.overlapV.x)) * v.x
+
+          } else {
+
+            v.x = signx
+            response.overlapV.x = Math.abs(response.overlapV.x) * v.x
+
+          }
+
+          if(signy && v.y && signy !== v.y) {
+
+            response.overlapV.y = (self.obj.size.y + obj.size.y - Math.abs(response.overlapV.y)) * v.y
+
+          } else {
+
+            v.y = signy
+            response.overlapV.y = Math.abs(response.overlapV.y) * v.y
+
+          }
+
+          response.overlapV.x += 0.01 * v.x
+          response.overlapV.y += 0.01 * v.y
+
+          self.obj.setXZ(
+            self.obj.SAT.h.pos.x + response.overlapV.x, 
+            self.obj.wall.coplanarPoint(new Vector3), 
+            self.obj.SAT.h.pos.y + response.overlapV.y
+          )
+
+          collide(v)
+          return
 
         }
 
@@ -394,274 +502,34 @@ function moveSelected(self) {
 
     }
 
-}
+    collide(new Vector2)
 
-function moveByWall(self, wall, position) {
-
-  self.obj.obj.rotation.y = wall.mesh.rotation.y
-
-  wall.limits_y.forEach(limit => limit.mesh.visible = true)
-
-  var info = self.getObjInfo(self.obj)
-  var all = self.getWallInfo(wall, [self.obj])
-
-  var rect = new Rectangle().setFromSizeAndAngle(info.size.x, info.size.y, 0)
-  rect.position.x = new Vector2(position.x, position.z).rotateAround({x:0, y:0}, info.obj.obj.rotation.y).x
-  rect.position.z = position.y
-
-  // find points
-  var max = _Math.calcRealSize(new Vector3(info.size.x/2, info.size.y/2, 0), wall.rot, 'x', 'z')
-  var min = max.clone().multiplyScalar(-1)
-  max.add(position)
-  min.add(position)
-
-  /**
-   * fixed by wall sizes
-   */
-
-  // TODO add multi
-
-  // fx by len (xz)
-  var vec = new Vector3(max.x - min.x, 0, max.z - min.z).normalize()
-  if(new Vector3(min.x - wall.position.x, 0, min.z - wall.position.z).length() > wall.l/2) {
-
-    position.x = wall.position.x
-    position.z = wall.position.z
-    position.add(vec.multiplyScalar(info.size.x/2 - wall.l/2))
-
-  } else if(new Vector3(max.x - wall.position.x, 0, max.z - wall.position.z).length() > wall.l/2) {
-
-    position.x = wall.position.x
-    position.z = wall.position.z
-    position.add(vec.multiplyScalar(wall.l/2 - info.size.x/2))
+    self.updateSizeLines(self.obj)
 
   }
-  // fx by y
-  if(min.y < 0) position.y = info.size.y/2
-  else if(max.y > wall.HEIGHT) position.y = wall.HEIGHT - info.size.y/2
-
-  /**
-   * find crosses and fixed
-   */
-  var isUseLimitsByY = false
-
-  var rect1 = new Rectangle, cross = false, info1
-
-  for(info1 of all) {
-    // fix this on slanting
-    rect1.setFromSizeAndAngle(info1.size.x, info1.size.y, 0)
-    rect1.position.x = new Vector2(info1.obj.obj.position.x, info1.obj.obj.position.z).rotateAround({x:0, y:0}, wall.mesh.rotation.y).x
-    rect1.position.z = info1.obj.obj.position.y
-
-    if(cross = rect.cross(rect1)) break
-
-  }
-
-  if(cross) {
-
-    var v
-
-    if(cross.length) {
-
-      if(cross[0].line1.equals(cross[1].line1)) {
-
-        var point = rect.isInsidePoint(cross[0].line2.start) ? cross[0].line2.start : cross[0].line2.end 
-
-        v = point.sub( 
-          cross[0].point 
-        ).normalize().toFixed()
-
-      } else if(cross[0].line2.equals(cross[1].line2)) {
-
-        v = cross[0].point.sub( 
-          rect1.isInsidePoint(cross[0].line1.start) ? cross[0].line1.start : cross[0].line1.end 
-        ).normalize().toFixed()
-
-      } else {
-
-        var p = (cross[0].line1.start.equals(cross[1].line1.start) || cross[0].line1.start.equals(cross[1].line1.end)) ?
-                  cross[0].line1.start : cross[0].line1.end
-
-        v = cross[+( cross[0].point.distanceTo(p) > cross[1].point.distanceTo(p) )]
-                    .point.clone().sub(p).normalize().toFixed()
-
-      }
-
-    } else {
-
-      var triangles = rect1.getTriangles()
-      var lpos = rect.position.clone().sub(rect1.position)
-      v = new Vector3
-
-      for(var triangle of triangles) {
-
-        if(_Math.pointInTriangle2(lpos, ...triangle, 'x', 'z')) {
-
-          triangle = triangle.filter(v => !v.equals({x:0, y:0, z:0}))
-          v.copy(triangle[0]).sub(triangle[1]).divideScalar(2).add(triangle[1]).normalize().toFixed()
-
-          break
-
-        }
-
-      }
-
-    }
-
-    if(Math.abs(v.x) < Math.abs(v.z)) {
-      // mv by y
-      position.y = info1.obj.obj.position.y + (info1.size.y + info.size.y) / 2 * (v.z < 0 ? -1 : 1)
-
-    } else {
-      // mv by len (xz)
-      var vec = wall.vec.clone()
-      if(v.x < 0) vec.multiplyScalar(-1)
-
-      position.x = info1.obj.obj.position.x
-      position.z = info1.obj.obj.position.z
-
-      position
-        .sub(wall.normal.clone().multiplyScalar(info1.size.z / 2))
-        .add(vec.multiplyScalar((info1.size.x + info.size.x) / 2))
-
-      isUseLimitsByY = true
-
-    }
-
-  }
-
-  // fixed by limits_y
-  if(!cross || isUseLimitsByY) {
-
-    var h1 = position.y - info.size.y/2
-    var h2 = position.y + info.size.y/2
-
-    var limit = false
-
-    if(limit = wall.limits_y.find( l => (h1 < l.h && h1 + LIMIT_GAP >= l.h) || (h1 > l.h && h1 - LIMIT_GAP <= l.h) )) {
-
-      position.y = limit.h + info.size.y/2
-
-    } else if(limit = wall.limits_y.find( l => (h2 < l.h && h2 + LIMIT_GAP >= l.h) || (h2 > l.h && h2 - LIMIT_GAP <= l.h) )) {
-
-      position.y = limit.h - info.size.y/2
-
-    }
-
-  }
-
-  /**
-   * mv
-   */
-  var mv = wall.normal.clone().multiplyScalar(info.size.z/2)
-
-  self.obj.obj.position.copy(position).add(mv)
-
-}
-
-function findPosition(self, obj, rect) {
-
-  raycaster.setFromCamera( new Vector2, self.scene.camera )
-  
-  var wall, dist = false
-  var ndist = new Vector3
-
-  var cam_angle = new Vector2(raycaster.ray.direction.x, raycaster.ray.direction.z).normalize().multiplyScalar(-1).angle()
-
-  for(var i = 0; i < self.room._walls.length; i++) {
-
-    var w = self.room._walls[i]
-
-    if(Math.abs(new Vector2(w.rvec.x, w.rvec.z).normalize().angle() - cam_angle) > Math.PI/2)
-      continue
-
-    if(raycaster.ray.intersectPlane(w, ndist)) {
-
-      var len = ndist.sub(self.scene.camera.position).length()
-
-      if(!dist || len < dist) {
-        dist = len
-        wall = w
-      }
-
-    }
-
-  }
-
-  obj.rotation.y = new Vector2(0, 1).angle() - new Vector2(wall.rvec.x, wall.rvec.z).angle()
-  obj.position.set(wall.point1.x, obj.position.y, wall.point1.z)
-    .add(wall.vec.clone().multiplyScalar(rect.size.x/2))
-    .add(wall.rvec.clone().multiplyScalar(rect.size.y/2))
-
-  var pline = new Plane(wall.normal, wall.constant - rect.size.y + .1)
-  var line_points = []
-
-  for(var r of self.rects) {
-
-    if(r === rect) continue
-
-    var p
-    if(p = r.cross(pline))
-      line_points.push(p)
-
-  }
-
-  var tmp = wall.rvec.clone().multiplyScalar(.1)
-  line_points.forEach(p => { p[0].add(tmp); p[1].add(tmp) })
-
-  var opoints = [ obj.position.clone(), obj.position.clone() ]
-  var mv = wall.vec.clone().multiplyScalar(rect.size.x/2)
-  opoints[0].sub(mv)
-  opoints[1].add(mv)
-  var mv1 = wall.rvec.clone().multiplyScalar(rect.size.y/2)
-
-  for(var i = 0; i < line_points.length; i++) {
-
-    var points = line_points[i]
-
-    // TODO: проверять не вхождение точки в область, а пересечение областей
-    var bet1 = _Math.isBetweenPoints(opoints[0], ...points, wall.vec, 'x', 'z')
-    var bet2 = _Math.isBetweenPoints(opoints[1], ...points, wall.vec, 'x', 'z')
-    if(bet1 || bet2) {
-
-      var ch = opoints[1].clone().sub(opoints[0]).normalize()
-
-      if(ch.equals(wall.vec)) {
-        opoints[0] = points[1].sub(mv1)
-        opoints[1] = opoints[0].clone().add(mv.clone().multiplyScalar(1.9))
-      } else {
-        opoints[0] = points[0].sub(mv1)
-        opoints[1] = opoints[1].clone().add(mv.clone().multiplyScalar(1.9))
-      }
-      
-      line_points.splice(i, 1)
-      i = -1
-
-    }
-
-  }
-
-  obj.position.copy(opoints[0].add(mv))
 
 }
 
 /**
  * exorted Class BMControl
  */
-
 function BMControl({ scene, points = [], dom = document.body, ocontrol } = {}) {
 
   this.objects = []
-  this.sizes = []
-  this.rects = []
 
-  this.room = new Room(points)
   this.events = {}
   this.obj = null
   this.move = false
   this.mouse = new Vector2
   this.scene = scene
-  this.ocontrol = ocontrol
+  this.ocontrol = ocontrol;
+  // создается 4 размерных линии, сразу скрываются, добавляются на сцену и хранятся в массиве this.size_lines
+  (this.size_lines = [new SizeLine({w:10}), new SizeLine({w:10}), new SizeLine({w:10}), new SizeLine({w:10})]).forEach((line) => {
+
+    this.scene.scene.add(line)
+    line.visible = false
+
+  })
 
   var events = {
     mouseMove: mouseMove.bind(this),
@@ -669,7 +537,11 @@ function BMControl({ scene, points = [], dom = document.body, ocontrol } = {}) {
     mouseUp: mouseUp.bind(this)
   }
 
+  this._enabled = false
+
   this.enable = function(bool) {
+
+    this.enabled = bool
 
     var func = bool ? 'addEventListener' : 'removeEventListener'
 
@@ -681,8 +553,6 @@ function BMControl({ scene, points = [], dom = document.body, ocontrol } = {}) {
 
   }
 
-  this.enable(true)
-
   /**
    * если кнопка мыши была поднята в течении
    * некоторого времени, то выделяем обьект,
@@ -690,56 +560,35 @@ function BMControl({ scene, points = [], dom = document.body, ocontrol } = {}) {
    */
   this.moveTimeout = null
 
+  this.room = new Room(points, this)
+  this.enable(true)
+
 }
 
 BMControl.prototype.add = function() {
+
+  var res = []
 
   for ( var i = 0; i < arguments.length; i ++ ) {
 
     var info = arguments[i]
 
-    var obj = info, size = new Vector3, rect
+    var obj = info
 
     if(obj.isObject3D) {
 
-      obj = { obj, type: 'floor' }
+      obj = { obj, type: 'floor', position: true }
       
     }
 
-    rect = new Rectangle().bindObject3d(obj.obj, size)
+    var bmobj = new BMObject( Object.assign({ parent: this }, obj) )
 
-    Object.defineProperty(obj.obj.rotation, 'y', {
-      set: (function(value) {
-
-        // get from THREE https://github.com/mrdoob/three.js/blob/master/src/math/Euler.js
-        this.obj.rotation._y = value
-        this.obj.rotation.onChangeCallback()
-        // add custom
-        if(this.obj.userData.rectCacheRotY !== value) {
-          this.rect.setFromSizeAndAngle(
-            size.x,
-            size.z,
-            value
-          )
-          this.obj.userData.rectCacheRotY = this.obj.rotation.y
-        }
-        
-      }).bind({obj: obj.obj, rect}),
-      get() {
-        return this._y
-      }
-    })
-
-    this.objects.push(obj)
-    this.sizes.push(size)
-    this.rects.push(rect)
-
-    obj.obj.rotation.y = 0
-    obj.obj.position.y = size.y/2
-
-    // findPosition(this, obj, rect)
+    this.objects.push(bmobj)
+    res.push(bmobj)
 
   }
+
+  return res
 
 }
 
@@ -751,15 +600,13 @@ BMControl.prototype.remove = function() {
     
     if(obj.isObject3D) {
 
-      idx = this.objects.findIndex(o => o.obj === obj)
+      idx = this.objects.findIndex(o => o.mesh === obj)
 
     } else idx = this.objects.indexOf(obj)
 
     if(idx !== -1) {
 
       this.objects.splice(idx, 1)
-      this.sizes.splice(idx, 1)
-      this.rects.splice(idx, 1)
 
     }
 
@@ -769,20 +616,17 @@ BMControl.prototype.remove = function() {
 
 BMControl.prototype.selectedObject = function(obj) {
 
-  if(this.ocontrol && this.ocontrol.enabled) {
+  if(this.ocontrol) {
 
-    this.ocontrol.enabled = false
+    this.ocontrol.enableZoom = true
+    this.ocontrol.enableRotate = false
+    this.ocontrol.enablePan = false
+    this.ocontrol.enableKeys = false
     
   }
 
-  var wall = this.getWallByObj(obj)
-  if(wall) {
-
-    wall.limits_y.forEach(limit => limit.mesh.visible = true)
-
-  }
-
   this.obj = obj
+  this.updateSizeLines(this.obj)
 
   if(this.events.onselected)
     this.events.onselected(obj, this.objects)
@@ -798,67 +642,17 @@ BMControl.prototype.unselectedObject = function(resetOControl) {
   if(this.events.onunselected)
     this.events.onunselected(this.obj, this.objects)
 
-  this.room._walls.forEach(wall => wall.limits_y.forEach(limit => limit.mesh.visible = false))
-
   this.obj = null
+  this.updateSizeLines()
 
-  if(this.ocontrol && !this.ocontrol.enabled) {
+  if(this.ocontrol) {
 
-    this.ocontrol.enabled = true
+    this.ocontrol.enableZoom = true
+    this.ocontrol.enableRotate = true
+    this.ocontrol.enablePan = true
+    this.ocontrol.enableKeys = true
     
   }
-
-};
-
-BMControl.prototype.getSizeObj = function(obj) {
-
-  var idx = this.objects.indexOf(obj)
-
-  if(idx === -1) return false
-
-  return this.sizes[idx]
-
-};
-
-BMControl.prototype.getRectObj = function(obj) {
-
-  var idx = this.objects.indexOf(obj)
-
-  if(idx === -1) return false
-
-  return this.rects[idx]
-
-};
-
-BMControl.prototype.getObjInfo = function(obj) {
-
-  var idx = this.objects.indexOf(obj)
-
-  if(idx === -1) return false
-
-  return {
-
-    rect: this.rects[idx],
-    size: this.sizes[idx],
-    obj
-
-  }
-
-};
-
-BMControl.prototype.getWallInfo = function(wall, exclude) {
-
-  var res = []
-
-  for(var obj of wall.objects) {
-
-    if(exclude && exclude.includes(obj)) continue
-
-    res.push(this.getObjInfo(obj))
-
-  }
-
-  return res
 
 };
 
@@ -868,13 +662,286 @@ BMControl.prototype.getWallByObj = function(obj) {
 
 };
 
+BMControl.prototype.clear = function() {
+
+  this.obj = false
+
+  while(this.objects.length)
+    this.objects[0].remove()
+
+  this.room.clear()
+
+};
+
+BMControl.prototype.updateSizeLines = function(obj) {
+
+  if(!obj) {
+
+    this.size_lines.forEach(line => line.visible = false)
+
+    return
+
+  }
+
+  if(obj.type === 'floor') {
+
+    ray.origin.copy(obj.mesh.position)
+    ray.origin.y = 1
+
+    var dirs = [
+      [-1, 0, 0], [1, 0, 0],  //left right
+      [0, 0, 1], [0, 0, -1]    //top bottom
+    ]
+
+    var size = obj.realsize
+    var info = new Array(4)
+
+    for(var o of this.objects) {
+
+      if (o === obj) continue
+
+      var o_size = o.realsize
+
+      box.setFromCenterAndSize(o.mesh.position, o_size)
+
+      for(var i = 0; i < 4; i++) {
+
+        ray.direction.set(...dirs[i])
+
+        if( ray.intersectsBox(box) ) {
+
+          var abs_dir = ray.direction.clone().abs()
+          var v = i < 2 ? 'x' : 'z'
+
+          var n_v = o.mesh.position.clone().multiply(abs_dir).add( 
+            obj.mesh.position.clone().multiply( new Vector3(1,1,1).sub(abs_dir) )
+          ).add(ray.direction.multiplyScalar(-o_size[v]/2))
+
+          if(!info[i] || n_v.distanceTo(obj.mesh.position) < info[i].distanceTo(obj.mesh.position)) 
+            info[i] = n_v
+
+          // 1 обьект может пересекаться только с 1 стороной, потому нет смысла проходить весь цикл
+          break 
+
+        }
+
+      }
+      
+    }
+
+    // if not find obj, find point on wall
+    var walls = this.room._walls.map(wall => wall.mesh)
+
+    for(var i = 0; i < 4; i ++) {
+
+      if(info[i]) continue
+
+      raycaster.ray.origin.copy(obj.mesh.position)
+      raycaster.ray.direction.set(...dirs[i])
+
+      var res = raycaster.intersectObjects(walls, false)
+
+      if(res.length) {
+
+        info[i] = res[0].point
+
+      }
+
+    }
+
+    // show lines 
+    var rots = [
+      0, Math.PI,             //left right
+      Math.PI/2, Math.PI*1.5  //top bottom
+    ]
+
+    var o_points = [
+      obj.mesh.position.clone(), obj.mesh.position.clone(),
+      obj.mesh.position.clone(), obj.mesh.position.clone()
+    ]
+    o_points[0].x -= size.x/2 //left
+    o_points[1].x += size.x/2 //right
+    o_points[2].z += size.z/2 //top
+    o_points[3].z -= size.z/2 //bottom
+
+    for(var i = 0; i < 4; i++) {
+
+      if(!info[i]) continue
+
+      var line = this.size_lines[i]
+      var l = +info[i].distanceTo(o_points[i]).toFixed(2)
+
+      if(l > 4) {
+
+        line.visible = true
+        line.position.copy(o_points[i]).sub(info[i]).divideScalar(2).add(info[i])
+        line.l = l
+        line.rotation.set(0, rots[i], Math.PI/2)
+
+      } else line.visible = false
+
+    }
+
+  } else {
+
+    if(!obj.wall) return
+
+    var size = obj.size
+    var info = new Array(3)
+
+    var dirs = [
+      [-1,0,0], [1,0,0], [0,-1,0] // left right down
+    ]
+
+    var v2 = new Vector2
+    var v3 = new Vector3
+
+    var wall_start = v2.set(obj.wall.point1.x, obj.wall.point1.z).rotateAround({x:0, y:0}, obj.wall.mesh.rotation.y).x
+    var wall_end = v2.set(obj.wall.point2.x, obj.wall.point2.z).rotateAround({x:0, y:0}, obj.wall.mesh.rotation.y).x
+
+    var ro_position = new Vector3(
+      v2.set(obj.mesh.position.x, obj.mesh.position.z).rotateAround({x:0, y: 0}, obj.wall.mesh.rotation.y).x,
+      obj.mesh.position.y,
+      size.z/2
+    )
+
+    ray.origin.copy(ro_position)
+    ray.origin.z = 4
+
+    for(var o of obj.wall.objects) {
+
+      if(o === obj) continue
+
+      var o_size = o.size
+
+      v3.set(
+        v2.set(o.mesh.position.x, o.mesh.position.z).rotateAround({x:0, y:0}, obj.wall.mesh.rotation.y).x,
+        o.mesh.position.y,
+        o_size.z/2
+      )
+
+      box.setFromCenterAndSize(v3, o_size)
+
+      for(var i = 0; i < 3; i++) {
+
+        ray.direction.set(...dirs[i])
+
+        if( ray.intersectsBox(box) ) {
+
+          switch(i) {
+
+            case 0:
+              var n_v = v3.x + o_size.x/2
+              if(!info[i] || Math.abs(n_v-ro_position.x) < Math.abs(info[i]-ro_position.x))
+                info[i] = n_v
+              break
+            case 1:
+              var n_v = v3.x - o_size.x/2
+              if(!info[i] || Math.abs(n_v-ro_position.x) < Math.abs(info[i]-ro_position.x))
+                info[i] = n_v
+              break
+            case 2:
+              info[i] = v3.y + o_size.y/2
+              break
+
+          }
+
+          // 1 оьект может пересекаться только с 1 стороной, потому нет смысла проходить весь цикл
+          break 
+
+        }
+
+      }
+
+    }
+
+    if(!info[0]) {
+
+      info[0] = wall_start
+
+    }
+
+    if(!info[1]) {
+
+      info[1] = wall_end
+
+    }
+
+    if(!info[2]) {
+
+      info[2] = this.room._floor.position.y
+
+    }
+
+    // left right
+    info[0] = [info[0] - wall_start, (ro_position.x - size.x/2) - wall_start]
+    info[1] = [info[1] - wall_start, (ro_position.x + size.x/2) - wall_start]
+
+    var z_mv = obj.wall.normal.clone().multiplyScalar(size.z/2)
+
+    for(var i = 0; i < 2; i++) {
+
+      // convert positions
+      for(var j in info[i]) {
+
+        info[i][j] = obj.wall.point1.clone().add(
+          obj.wall.vec.clone().multiplyScalar(info[i][j])
+        ).add(z_mv)
+
+        info[i][j].y = obj.mesh.position.y
+
+      }
+
+      // calc lines
+      var p1 = info[i][0]
+      var p2 = info[i][1]
+
+      var l = +p1.distanceTo(p2).toFixed(2)
+      var line = this.size_lines[i]
+
+      if(l > 4) {
+
+        line.visible = true
+        line.l = l
+        line.position.copy(p1.sub(p2).divideScalar(2).add(p2))
+        line.rotation.set(Math.PI/2, 0, Math.PI/2 + (2*Math.PI-obj.wall.mesh.rotation.y))
+
+      } else line.visible = false
+
+    }
+
+    // bottom
+    var p1 = obj.mesh.position.clone()
+    p1.y -= size.y/2
+    var p2 = obj.mesh.position.clone()
+    p2.y = info[2]
+
+    var l = +p1.distanceTo(p2).toFixed(2)
+    var line = this.size_lines[2]
+
+    if(l > 4) {
+
+      line.visible = true
+      line.l = l
+      line.position.copy(p1.sub(p2).divideScalar(2).add(p2))
+      line.rotation.set(0, Math.PI/2 + (obj.wall.mesh.rotation.y), 0)
+
+    } else line.visible = false
+
+  }
+
+};
+
 /**
  * Event on dom
  */
 function mouseMove(e) {
 
-  this.mouse.x = (e.clientX / window.innerWidth ) * 2 - 1
-  this.mouse.y = - ( e.clientY / window.innerHeight ) * 2 + 1;
+  var dom = this.scene.renderer.domElement
+  var bounds = dom.getBoundingClientRect()
+
+  this.mouse.x = ((e.clientX - bounds.left) / dom.clientWidth) * 2 - 1,
+  this.mouse.y = -((e.clientY - bounds.top) / dom.clientHeight) * 2 + 1
 
   if(this.obj) {
 

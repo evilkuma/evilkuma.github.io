@@ -88,9 +88,9 @@
     SCOPE.room_sizes = SCOPE.gui.addFolder('room sizes')
     ROOMS.forEach(r => rooms.add({ load: loadRoom.bind(r.data) }, 'load').name(r.caption))
 
-    SCOPE.gui.add({editWalls() { rmcontrol.enable() }}, 'editWalls').name('edit walls mode enabled')
+    // SCOPE.gui.add({editWalls() { rmcontrol.enable() }}, 'editWalls').name('edit walls mode enabled')
 
-    loadRoom.bind(ROOMS[7].data)()
+    loadRoom.bind(ROOMS[0].data)()
 
     // bmcontrol.events.onview = function(obj, objs) {
     //   objs.forEach(o => o.obj.mark())
@@ -172,6 +172,49 @@
       g.name(a.title)
       
     })
+
+    var textures = {
+
+      wall: [ 'map.jpg', 'map1.png', 'map2.jpg', 'map3.jpg', 'map4.jpg' ],
+      floor: [ 'map.jpg', 'map1.jpg', 'map2.jpg', 'map3.jpg' ]
+
+    }
+
+    SCOPE.gui.add({
+
+      _i: 0,
+      i() {
+
+        bmcontrol.room.setWallTexture('./assets/textures/wall/' + textures.wall[this._i])
+
+        if(++this._i === textures.wall.length) this._i = 0
+
+      }
+
+    }, 'i').name('change wall texture')
+    
+    SCOPE.gui.add({
+
+      _i: 0,
+      i() {
+
+        bmcontrol.room.setFloorTexture('./assets/textures/floor/' + textures.floor[this._i])
+
+        if(++this._i === textures.floor.length) this._i = 0
+
+      }
+
+    }, 'i').name('change floor texture')
+
+    SCOPE.gui.add({
+
+      func() {
+
+        bmcontrol.objects.forEach(obj => obj.findWall())
+
+      }
+
+    }, 'func')
 
   }
 

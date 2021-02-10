@@ -2,18 +2,23 @@
 import { Plane } from 'three/src/math/Plane'
 import { Euler } from 'three/src/math/Euler'
 import { Vector3 } from 'three/src/math/Vector3'
+import { Vector2 } from 'three/src/math/Vector2'
 import { Object3D } from 'three/src/core/Object3D'
 import { Shape } from 'three/src/extras/core/Shape'
 import { Mesh } from 'three/src/objects/Mesh'
-import { ShapeGeometry } from 'three/src/geometries/ShapeGeometry'
+import { ShapeBufferGeometry } from 'three/src/geometries/ShapeGeometry'
 import { MeshStandardMaterial } from 'three/src/materials/MeshStandardMaterial'
 import { MeshBasicMaterial } from 'three/src/materials/MeshBasicMaterial'
 import { LineBasicMaterial } from 'three/src/materials/LineBasicMaterial'
 import { BufferGeometry } from 'three/src/core/BufferGeometry'
 import { BufferAttribute } from 'three/src/core/BufferAttribute'
-
+import { Line } from 'three/src/objects/Line'
+import { TextureLoader } from 'three/src/loaders/TextureLoader'
+import { RepeatWrapping } from 'three/src/constants'
 
 import { SizeLine } from './SizeLine'
+
+var SAT = require('sat')
 
 function sizesToPoints(info) {
 
@@ -59,12 +64,12 @@ function sizesToPoints(info) {
 
 }
 
-const WALL_HEIGHT = 150
-const WALL_WEIGHT = 10
-
 /**
  * Wall class
  */
+
+var WALL_HEIGHT = 150
+var WALL_WEIGHT = 10
 
 function Wall(parent, point1, point2, caption = 'A') {
 
@@ -81,29 +86,39 @@ function Wall(parent, point1, point2, caption = 'A') {
 
   this.mesh = new Mesh(new BufferGeometry, new MeshStandardMaterial( { color: 0xffffff, roughness: 1, metalness: .4 } ))
   var vert = new Float32Array( [
-    -.5, 0, 0,
-     .5, 0, 0,
-     .5, WALL_HEIGHT, 0,
-  
-     .5, WALL_HEIGHT, 0,
     -.5, WALL_HEIGHT, 0,
-    -.5, 0, 0
+    .5, WALL_HEIGHT, 0,
+    -.5, 0, 0,
+    .5, 0, 0
   ] );
   this.mesh.geometry.addAttribute('position', new BufferAttribute(vert, 3))
+  
+  var uv = new Float32Array( [
+    0, 1,
+    1, 1,
+    0, 0,
+    1, 0
+  ] )
+  this.mesh.geometry.addAttribute('uv', new BufferAttribute(uv, 2))
+
+  var indices = new Uint32Array([
+    0, 2, 1, 2, 3, 1
+  ])
+  this.mesh.geometry.setIndex( new BufferAttribute( indices, 1 ) );
+
   this.mesh.geometry.computeVertexNormals()
 
   this.mesh1 = new Mesh(new BufferGeometry, new MeshBasicMaterial( { color: 0xffffff } ))
   var vert = new Float32Array( [
     -.5, 0, 0,
-     .5, 0, 0,
-     .5, 0, -WALL_WEIGHT,
+      .5, 0, 0,
+      .5, 0, -WALL_WEIGHT,
   
-     .5, 0, -WALL_WEIGHT,
+      .5, 0, -WALL_WEIGHT,
     -.5, 0, -WALL_WEIGHT,
     -.5, 0, 0
   ] )
   this.mesh1.geometry.addAttribute('position', new BufferAttribute(vert, 3))
-  this.mesh1.geometry.computeVertexNormals()
   this.mesh1.visible = false
 
   this.line = new SizeLine({ l: this._l, w: 10 , text:'(' + caption + ')' })
@@ -112,6 +127,11 @@ function Wall(parent, point1, point2, caption = 'A') {
 
   // objects from this wall (from bmcontrols)
   this.objects = []
+
+  this.SAT = new SAT.Polygon(new SAT.Vector(0,0), [
+    new SAT.Vector(-1, 0),
+    new SAT.Vector( 1, 0)
+  ])
 
   if(point1 && point2) {
 
@@ -126,6 +146,9 @@ Wall.prototype = Object.create(Plane.prototype)
 Wall.prototype.HEIGHT = WALL_HEIGHT
 
 Wall.prototype.setFromPoints = function(point1, point2) {
+
+  point1.toFixed(0)
+  point2.toFixed(0)
 
   this.point1 = point1
   this.point2 = point2
@@ -156,6 +179,8 @@ Wall.prototype.remove = function() {
 
   var idx = this.parent._walls.indexOf(this)
   this.parent._walls.splice(idx, 1)
+
+  if(this.gui) this.gui.remove()
   if(this.mesh && this.mesh.parent) this.mesh.parent.remove(this.mesh)
   if(this.mesh1 && this.mesh1.parent) this.mesh1.parent.remove(this.mesh1)
   if(this.line && this.line.parent) this.line.parent.remove(this.line)
@@ -521,6 +546,41 @@ Wall.prototype.update = function() {
 
   })
 
+  this.SAT.points[0].x = -this._l/2
+  this.SAT.points[1].x = this._l/2
+  // this.SAT._recalc()
+  this.SAT.setAngle(-this.mesh.rotation.y)
+  this.SAT.pos.x = this.position.x
+  this.SAT.pos.y = this.position.z
+
+  this.posx = new Vector2(this.position.x, this.position.z).rotateAround(new Vector2, this.mesh.rotation.y).x
+
+  if(this.mesh.material.map) {
+    // update uv
+    var rx = Math.ceil(this._l / this.mesh.material.map.image.width)
+    var ry = Math.ceil(WALL_HEIGHT / this.mesh.material.map.image.height)
+
+    this.mesh.material.map.wrapS = this.mesh.material.map.wrapT = RepeatWrapping
+    this.mesh.material.map.repeat.set(rx, ry)
+
+    var max_x = this._l / (this.mesh.material.map.image.width * rx)
+    var max_y = WALL_HEIGHT / (this.mesh.material.map.image.height * ry)
+
+    var uvs = this.mesh.geometry.getAttribute('uv')
+    // uv sheme (indexes)
+    // 0, 1, (0, 1)
+    // 1, 1, (2, 3)
+    // 0, 0, (4, 5)
+    // 1, 0  (6, 7)
+    uvs.array[2] = uvs.array[6] = max_x
+    uvs.array[1] = uvs.array[3] = max_y
+
+    uvs.needsUpdate = true
+
+  }
+  
+  return this
+
 }
 
 Wall.prototype.ray = function(ray) {
@@ -540,11 +600,13 @@ Wall.prototype.ray = function(ray) {
 Wall.prototype.addObj = function(obj) {
 
   this.objects.push(obj)
+  
+  obj.setRotation(this.mesh.rotation.y)
 
 }
 
 Wall.prototype.removeObj = function(obj) {
-    
+  
   var i = this.objects.indexOf(obj)
 
   if(i === -1) return false
@@ -632,16 +694,17 @@ Object.defineProperties(Wall.prototype, {
  * Room class
  */
 
-const START_CHAR_CODE = 65 // A
+var START_CHAR_CODE = 65 // A
 var CURRENT_CHAR_CODE = START_CHAR_CODE
 
-function Room(points) {
+function Room(points, parent) {
 
   this.constructor()
 
   this._walls = []
   this._floor = null
   this._plane = new Plane(new Vector3(0, 1, 0))
+  this.bmcontrols = parent
 
   if(points && points.length) {
 
@@ -670,6 +733,21 @@ Room.prototype.setWalls = function(points) {
     this.add(wall.getFullMesh())
 
     CURRENT_CHAR_CODE++
+
+  }
+
+  for(var wall of this._walls) {
+
+    var w = wall.getNextWall()
+    if(wall.vec.angleTo(w.normal) === 0) {
+
+      wall.cantFullLen = true
+      w.cantFullLen = true
+
+      wall.update()
+      w.update()
+
+    }
 
   }
 
@@ -715,6 +793,8 @@ Room.prototype.updateFloor = function() {
 
   if(this._floor && this._floor.parent) this._floor.parent.remove(this._floor) 
 
+  if(!this._walls.length) return
+
   var geom = new Shape
 
   geom.moveTo(this._walls[0].point1.x, -this._walls[0].point1.z)
@@ -727,15 +807,68 @@ Room.prototype.updateFloor = function() {
 
   geom.lineTo(wall.point2.x, -wall.point2.z)
 
-  this._floor = new THREE.Mesh(
-    new ShapeGeometry(geom),
+  var map = this._floor ? this._floor.material.map : false
+
+  this._floor = new Mesh(
+    new ShapeBufferGeometry(geom),
     new MeshStandardMaterial( { color: 0xC04000, roughness: 1, metalness: .4 } )
   )
+
+  if(map) {
+
+    this._floor.material.map = map
+    this._floor.material.color.setHex(0xffffff)
+
+  }
+
+  this._floor.geometry.computeBoundingBox()
+
+  this.updateFloorUv()
 
   this._floor.rotation.x = -Math.PI/2
 
   this.add(this._floor)
   
+}
+
+Room.prototype.updateFloorUv = function() {
+
+  if(!this._floor.material.map) return
+
+  var map = this._floor.material.map
+
+  var bb = this._floor.geometry.boundingBox
+  var size = bb.getSize(new Vector3)
+
+  var rx = Math.ceil(size.x / map.image.width)
+  var ry = Math.ceil(size.y / map.image.height)
+  var w = map.image.width * rx
+  var h = map.image.height * ry
+
+  map.wrapS = map.wrapT = RepeatWrapping
+  map.repeat.set(rx, ry)
+
+  var positions = this._floor.geometry.getAttribute('position')
+  var uvs = this._floor.geometry.getAttribute('uv')
+
+  for(var i = 0; i < positions.count; i++) {
+
+    var idx = i*3
+    var uvidx = i*2
+
+    var x = positions.array[idx]
+    var y = positions.array[idx+1]
+
+    var xk = x + bb.max.x
+    var yk = y + bb.max.y
+
+    uvs.array[uvidx] = xk / w
+    uvs.array[uvidx+1] = yk / h
+
+  }
+
+  uvs.needsUpdate = true
+
 }
 
 Room.prototype.showY = function(is = !this._walls[0].mesh1.visible) {
@@ -748,6 +881,61 @@ Room.prototype.showY = function(is = !this._walls[0].mesh1.visible) {
     wall.line.visible = is
 
   }
+
+}
+
+Room.prototype.setWallMap = function(map) {
+
+  for(var wall of this._walls) {
+
+    wall.mesh.material.map = map.clone()
+    wall.mesh.material.map.needsUpdate = true
+
+    wall.mesh.material.color.setHex(0xffffff)
+    wall.mesh.material.needsUpdate = true
+
+    wall.update()
+
+  }
+
+}
+
+Room.prototype.setWallTexture = function(url) {
+
+  if(typeof url === 'string') {
+
+    new TextureLoader().load(url, map => this.setWallMap(map))
+
+  }
+
+}
+
+Room.prototype.setFloorMap = function(map) {
+
+  this._floor.material.map = map
+
+  this._floor.material.color.setHex(0xffffff)
+  this._floor.material.needsUpdate = true
+  
+  this.updateFloorUv()
+
+}
+
+Room.prototype.setFloorTexture = function(url) {
+
+  if(typeof url === 'string') {
+
+    new TextureLoader().load(url, map => this.setFloorMap(map))
+
+  }
+
+}
+
+Room.prototype.clear = function() {
+
+  this.setWalls([])
+
+  return this
 
 }
 
